@@ -1,0 +1,108 @@
+#!/bin/bash
+# QNX/BB10 (armv7) cross compiler/linker wrapper for the Node.js build.
+# Compile mode: forwards to clang-18 with the BB10 sysroot and QNX defines.
+# Link mode:    translates the GNU-style link line into a direct ld.lld-18 call,
+#               because clang's nto driver delegates to a (missing) QNX gcc.
+SYS=/opt/bb10ndk/target_10_3_1_995/qnx6
+ARM=$SYS/armle-v7
+IS_CXX=0
+case "$(basename "$0")" in
+  *++*) IS_CXX=1 ;;
+esac
+
+TARGET_FLAGS="--target=armv7-unknown-nto-qnx6.6.0 --sysroot=$SYS -march=armv7-a -mfloat-abi=softfp -mfpu=neon -fno-short-enums -fPIC"
+QNX_DEFS="-D_QNX_SOURCE -D__QNXNTO__ -D__QNX__=660 -D__LITTLEENDIAN__ -D__ARM__ -D_ALT_NS=1 -DEALREADY=EALREADY_NEW -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -DOPENSSL_NO_ASYNC -DNO_SYSLOG"
+INCS="-I/opt/qnxcompat"
+CXX_INCS="-std=gnu++20 -D_NO_CPP_INLINES -D_HAS_GENERIC_TEMPLATES=0 -Wno-c++11-narrowing -include /opt/qnxcompat/qnx_libstdcxx_shim.h -nostdinc++ -isystem /opt/gcc13qnx/include/c++/13/arm-qnx -isystem /opt/gcc13qnx/include/c++/13"
+
+mode=link
+for a in "$@"; do
+  case "$a" in
+    -c|-E|-S|-M|-MM) mode=compile ;;
+  esac
+done
+
+if [ "$mode" = compile ]; then
+  preproc=0
+  cargs=()
+  for a in "$@"; do
+    case "$a" in
+      -E|-M|-MM) preproc=1 ;;
+      -m32|-m64) continue ;;
+    esac
+    cargs+=("$a")
+  done
+  if [ "$IS_CXX" = 1 ] && [ $preproc = 0 ]; then
+    exec clang++-18 $TARGET_FLAGS $QNX_DEFS $INCS $CXX_INCS "${cargs[@]}"
+  elif [ "$IS_CXX" = 1 ]; then
+    exec clang++-18 $TARGET_FLAGS $QNX_DEFS $INCS "${cargs[@]}"
+  else
+    exec clang-18 $TARGET_FLAGS $QNX_DEFS $INCS "${cargs[@]}"
+  fi
+fi
+
+# ---- link mode ----
+out=""
+shared=0
+ldargs=()
+args=("$@")
+n=${#args[@]}
+i=0
+while [ $i -lt $n ]; do
+  a=${args[$i]}
+  case "$a" in
+    -o)
+      i=$((i+1)); out=${args[$i]} ;;
+    -shared)
+      shared=1 ;;
+    -Wl,*)
+      IFS=',' read -r -a parts <<< "${a#-Wl,}"
+      for p in "${parts[@]}"; do
+        case "$p" in
+          -soname|-h) ldargs+=(--soname) ;;
+          -soname=*) ldargs+=(--soname "${p#-soname=}") ;;
+          -h*) ldargs+=(--soname "${p#-h}") ;;
+          *) ldargs+=("$p") ;;
+        esac
+      done
+      ;;
+    -Xlinker)
+      i=$((i+1)); ldargs+=("${args[$i]}") ;;
+    -L*|-l*|-T*|-z*)
+      ldargs+=("$a") ;;
+    -pthread|-rdynamic|-static-libstdc++|-static-libgcc|--sysroot=*)
+      : ;;
+    -m32|-m64|-mfloat-abi=*|-march=*|-mfpu=*|-mthumb*|-mno-*|-mcpu=*)
+      : ;;
+    -O*|-g*|-f*|-W*|-std=*|-I*|-D*|-U*|-include|-isystem|-isysroot|-nostdinc*|-v|-pipe)
+      : ;;
+    --start-group|--end-group|--whole-archive|--no-whole-archive|--as-needed|--no-as-needed|--export-dynamic|--gc-sections|--no-rosegment|--rosegment|--allow-shlib-undefined|--no-allow-shlib-undefined)
+      ldargs+=("$a") ;;
+    -*)
+      : ;;
+    *)
+      ldargs+=("$a") ;;
+  esac
+  i=$((i+1))
+done
+
+if [ -z "$out" ]; then echo "qnx-clang: link without -o" >&2; exit 1; fi
+
+linkargs=(-m armelf --no-rosegment --allow-shlib-undefined -o "$out")
+if [ $shared = 1 ]; then
+  linkargs+=(-shared)
+else
+  linkargs+=(-dynamic-linker /usr/lib/ldqnx.so.2 "$ARM/lib/crt1.o")
+fi
+linkargs+=("$ARM/lib/crti.o")
+linkargs+=("${ldargs[@]}")
+linkargs+=("$ARM/lib/crtn.o")
+linkargs+=(-L/tmp/libs -L/opt/qnxstubs -L/root/nodebuild/uv-qnx/lib -L"$ARM/lib" -L"$ARM/usr/lib" -L"$SYS/lib" -L"$SYS/usr/lib")
+if [ "$IS_CXX" = 1 ]; then
+  linkargs+=(-lstdc++ -lgcc_s)
+else
+  linkargs+=(-lgcc_s)
+fi
+linkargs+=(-lsocket -lm -lc)
+
+exec ld.lld-18 "${linkargs[@]}"

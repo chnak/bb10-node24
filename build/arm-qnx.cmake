@@ -1,0 +1,26 @@
+set(CMAKE_SYSTEM_NAME Generic)
+set(CMAKE_SYSTEM_PROCESSOR arm)
+
+set(BB10_SYS /opt/bb10ndk/target_10_3_1_995/qnx6)
+set(BB10_ARM ${BB10_SYS}/armle-v7)
+set(BB10_GCC ${BB10_ARM}/lib/gcc/4.8.3)
+
+set(CMAKE_C_COMPILER /usr/bin/clang-18)
+set(CMAKE_CXX_COMPILER /usr/bin/clang-18)
+set(CMAKE_AR /usr/bin/llvm-ar-18)
+set(CMAKE_RANLIB /usr/bin/llvm-ranlib-18)
+set(CMAKE_LINKER /usr/bin/ld.lld-18)
+set(CMAKE_NM /usr/bin/llvm-nm-18)
+set(CMAKE_OBJCOPY /usr/bin/llvm-objcopy-18)
+set(CMAKE_OBJDUMP /usr/bin/llvm-objdump-18)
+
+set(BB10_TC_FLAGS "--target=armv7-unknown-nto-qnx6.6.0 --sysroot=${BB10_SYS} -mfloat-abi=soft -D__QNXNTO__ -D__QNX__=660 -D__LITTLEENDIAN__ -D__ARM__ -fPIC")
+set(BB10_CXXLIB_FLAGS "-nostdinc++ -isystem /opt/build/src/libcxx/include -isystem /opt/build/src/libcxx/src")
+set(CMAKE_C_FLAGS_INIT "${BB10_TC_FLAGS}")
+set(CMAKE_CXX_FLAGS_INIT "${BB10_TC_FLAGS} ${BB10_CXXLIB_FLAGS}")
+
+set(BB10_LINK_BASE "/usr/bin/ld.lld-18 -m armelf -o <TARGET> -dynamic-linker /usr/lib/ldqnx.so.2 ${BB10_ARM}/lib/crt1.o ${BB10_ARM}/lib/crti.o <OBJECTS> ${BB10_ARM}/lib/crtn.o <LINK_FLAGS> <LINK_LIBRARIES> -L${BB10_ARM}/lib -L${BB10_ARM}/usr/lib -L${BB10_GCC} -lc")
+set(CMAKE_C_LINK_EXECUTABLE "${BB10_LINK_BASE}")
+set(CMAKE_CXX_LINK_EXECUTABLE "${BB10_LINK_BASE}")
+set(CMAKE_C_CREATE_STATIC_LIBRARY "<CMAKE_AR> rcs <TARGET> <LINK_FLAGS> <OBJECTS>")
+set(CMAKE_CXX_CREATE_STATIC_LIBRARY "<CMAKE_AR> rcs <TARGET> <LINK_FLAGS> <OBJECTS>")
