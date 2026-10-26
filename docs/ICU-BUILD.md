@@ -39,8 +39,10 @@ If you re-run `./configure`, re-apply `build/patch_host_mk.py` afterwards
 
 ## Keep the break data
 
-Copy [`../patches/icu_small.json`](../patches/icu_small.json) over
-`tools/icu/icu_small.json` before building:
+`patches/qnx-bb10-node24.patch` already contains this change (it is the diff
+of `tools/icu/icu_small.json` against upstream). If you patch the tree by
+hand instead, copy [`../patches/icu_small.json`](../patches/icu_small.json)
+over `tools/icu/icu_small.json` before building:
 
 ```bash
 cp ../patches/icu_small.json tools/icu/icu_small.json

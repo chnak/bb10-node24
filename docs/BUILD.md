@@ -1,4 +1,6 @@
 > **Repo note:** paths like `D:\BB10\wslbuild\newdistro` and `deploy` come from the original development machine. In this repository the same scripts are under `build/` (formerly `newdistro/`) and `deploy/`. The ICU build is documented in `ICU-BUILD.md`.
+>
+> **Source:** the upstream Node.js source is not vendored here. Run `bash build/fetch-node.sh` to download v24.22.1 and apply `patches/qnx-bb10-node24.patch` — that series is the end state of the `build/patch_*.py` scripts described below, so most of them are only needed if you want to redo the steps interactively. `patch_host_mk.py` must still be re-run after every `./configure` (section 5.7).
 
 # BB10 / QNX 6.6 交叉编译 Node.js 24（BlackBerry Q20）
 

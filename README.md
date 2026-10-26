@@ -21,6 +21,7 @@ Prebuilt binaries are published on the
 |---|---|---|
 | `bb10-node24-runtime-v24.22.1.tar.gz` **（推荐 / recommended）** | 28,447,631 B | `451291df7441cb9bd44dfc2f7004f6b974c79153cfb7bfbc7c3fcf462a5589a4` |
 | `node.bin.icu2`（仅二进制 / binary only） | 62,725,912 B | `9a0b965e33769cb409b8dfb7f46c32c78d897b88a79d63aa312605ceff50968b` |
+| `node-v24.22.1-bb10-icu-source.tar.xz`（预打补丁的源码） | 62,708,500 B | `b1abab06b46da98d6e19723c5f75e5ea451c5ce95592f37330b6a84961aece03` |
 
 The **runtime bundle** is the recommended download. It contains
 `bin/node.bin`, relocatable `node`/`npm`/`npx` wrappers, the patched
@@ -49,10 +50,26 @@ libraries and npm.
 ```
 docs/       build notes and device deployment guide
 build/      cross-toolchain wrapper, prep scripts and source patch scripts
-patches/    drop-in data patches (ICU small-data config, minimal uchar.h)
+patches/    QNX patch series + drop-in data patches (ICU small-data config, uchar.h)
 deploy/     device connect/install/verify scripts (placeholders, no secrets)
 licenses/   Node.js and ICU license texts
 ```
+
+## Source
+
+The Node.js source itself is **not** vendored here: upstream is MIT licensed and
+far larger than this repository. What this repository ships is
+
+- `patches/qnx-bb10-node24.patch` — the complete QNX/BB10 patch series
+  (24 files) that turns upstream v24.22.1 into the BB10 build tree
+- `build/fetch-node.sh` — downloads upstream v24.22.1 and applies the series
+- `build/patch_*.py` — the original step-by-step patch scripts the series was
+  derived from (the series is their end state, so most are no longer needed;
+  `patch_host_mk.py` still has to run after every `./configure`)
+
+A pre-patched source tarball is published on the
+[Releases](https://github.com/chnak/bb10-node24/releases) page as well, so
+nobody has to apply the patches by hand.
 
 ## Build
 
@@ -69,6 +86,9 @@ The full field notes, including every workaround, are in
 Key steps (from a configured tree):
 
 ```bash
+# 0) get the upstream source and apply the QNX/BB10 patch series
+bash build/fetch-node.sh
+
 cd /root/nodebuild/node-v24.22.1-icu
 ./configure \
   --dest-os=qnx --dest-cpu=arm --cross-compiling \

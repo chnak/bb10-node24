@@ -1,0 +1,719 @@
+QNX / BlackBerry 10 patches for Node.js v24.22.1
+Apply from the Node.js source root with:  patch -p1 < qnx-bb10-node24.patch
+
+--- a/configure.py
++++ b/configure.py
+@@ -45,7 +45,7 @@
+ parser = argparse.ArgumentParser()
+ 
+ valid_os = ('win', 'mac', 'solaris', 'freebsd', 'openbsd', 'linux',
+-            'android', 'aix', 'cloudabi', 'os400', 'ios', 'openharmony')
++            'android', 'aix', 'cloudabi', 'os400', 'ios', 'openharmony', 'qnx')
+ valid_arch = ('arm', 'arm64', 'ia32', 'mips', 'mipsel', 'mips64el',
+               'ppc64', 'x64', 'x86', 'x86_64', 's390x', 'riscv64', 'loong64')
+ valid_arm_float_abi = ('soft', 'softfp', 'hard')
+--- a/deps/cares/cares.gyp
++++ b/deps/cares/cares.gyp
+@@ -217,6 +217,10 @@
+             '--std=gnu11'
+           ],
+         }],
++        [ 'OS=="qnx"', {
++          'include_dirs': [ 'config/qnx' ],
++          'sources': [ 'config/qnx/ares_config.h' ]
++        }],
+         [ 'OS=="linux"', {
+           'include_dirs': [ 'config/linux' ],
+           'sources': [ 'config/linux/ares_config.h' ]
+--- a/deps/openssl/openssl-cl_no_asm.gypi
++++ b/deps/openssl/openssl-cl_no_asm.gypi
+@@ -6,7 +6,7 @@
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl-cl.gypi'],
+-    }, 'target_arch=="arm" and OS in ("linux", "android")', {
++    }, 'target_arch=="arm" and OS in ("linux", "android", "qnx")', {
+       'includes': ['config/archs/linux-armv4/no-asm/openssl-cl.gypi'],
+     }, 'target_arch=="arm64" and OS in ("linux", "android", "openharmony")', {
+       'includes': ['config/archs/linux-aarch64/no-asm/openssl-cl.gypi'],
+--- a/deps/openssl/openssl_no_asm.gypi
++++ b/deps/openssl/openssl_no_asm.gypi
+@@ -7,7 +7,7 @@
+       'includes': ['config/archs/linux-ppc64le/no-asm/openssl.gypi'],
+     }, 'target_arch=="s390x" and OS=="linux"', {
+       'includes': ['config/archs/linux64-s390x/no-asm/openssl.gypi'],
+-    }, 'target_arch=="arm" and OS in ("linux", "android")', {
++    }, 'target_arch=="arm" and OS in ("linux", "android", "qnx")', {
+       'includes': ['config/archs/linux-armv4/no-asm/openssl.gypi'],
+     }, 'target_arch=="arm64" and OS in ("linux", "android", "openharmony")', {
+       'includes': ['config/archs/linux-aarch64/no-asm/openssl.gypi'],
+--- a/deps/uv/src/unix/core.c
++++ b/deps/uv/src/unix/core.c
+@@ -690,7 +690,8 @@
+     r = fcntl(fd, F_SETFL, flags);
+   while (r == -1 && errno == EINTR);
+ 
+-  if (r)
++  /* QNX returns the previous flags on success, not 0. */
++  if (r == -1)
+     return UV__ERR(errno);
+ 
+   return 0;
+@@ -709,7 +710,8 @@
+     r = fcntl(fd, F_SETFD, flags);
+   while (r == -1 && errno == EINTR);
+ 
+-  if (r)
++  /* QNX returns the previous flags on success, not 0. */
++  if (r == -1)
+     return UV__ERR(errno);
+ 
+   return 0;
+--- a/deps/uv/src/unix/fs.c
++++ b/deps/uv/src/unix/fs.c
+@@ -211,8 +211,7 @@
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)                                                         \
+-    || defined(__QNX__)
++    || defined(__sun)
+ static struct timespec uv__fs_to_timespec(double time) {
+   struct timespec ts;
+ 
+@@ -242,8 +241,7 @@
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)                                                         \
+-    || defined(__QNX__)
++    || defined(__sun)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+@@ -568,11 +566,74 @@
+ 
+ 
+ static ssize_t uv__fs_scandir(uv_fs_t* req) {
++#if defined(__QNX__)
++  /* QNX 6.6 libc does not export scandir(); emulate it. */
++  uv__dirent_t** dents;
++  uv__dirent_t* dent;
++  struct dirent* ent;
++  DIR* dir;
++  size_t n;
++  size_t allocated;
++  size_t ent_size;
++
++  dents = NULL;
++  n = 0;
++  allocated = 0;
++  dir = opendir(req->path);
++  if (dir == NULL)
++    return -1;
++
++  while ((ent = readdir(dir)) != NULL) {
++    if (!uv__fs_scandir_filter((const uv__dirent_t*) ent))
++      continue;
++    /* QNX struct dirent ends in a flexible array: size the copy by name. */
++    ent_size = offsetof(uv__dirent_t, d_name) +
++               (ent->d_namelen ? (size_t) ent->d_namelen
++                               : strlen(ent->d_name)) + 1;
++    dent = uv__malloc(ent_size);
++    if (dent == NULL) {
++      closedir(dir);
++      while (n > 0)
++        uv__free(dents[--n]);
++      uv__free(dents);
++      errno = ENOMEM;
++      return -1;
++    }
++    memcpy(dent, ent, ent_size);
++    dent->d_name[ent_size - offsetof(uv__dirent_t, d_name) - 1] = '\0';
++    if (n == allocated) {
++      uv__dirent_t** tmp;
++      allocated = allocated ? allocated * 2 : 16;
++      tmp = uv__realloc(dents, allocated * sizeof(*dents));
++      if (tmp == NULL) {
++        uv__free(dent);
++        closedir(dir);
++        while (n > 0)
++          uv__free(dents[--n]);
++        uv__free(dents);
++        errno = ENOMEM;
++        return -1;
++      }
++      dents = tmp;
++    }
++    dents[n++] = dent;
++  }
++  closedir(dir);
++
++  if (n > 1)
++    qsort(dents, n, sizeof(*dents),
++          (int (*)(const void*, const void*)) uv__fs_scandir_sort);
++
++  req->nbufs = 0;
++  req->ptr = dents;
++  return (ssize_t) n;
++#else
+   uv__dirent_t** dents;
+   int n;
+ 
+   dents = NULL;
+-  n = scandir(req->path, &dents, uv__fs_scandir_filter, uv__fs_scandir_sort);
++  n = scandir(req->path, &dents, uv__fs_scandir_filter,
++              (int (*)(const void*, const void*)) uv__fs_scandir_sort);
+ 
+   /* NOTE: We will use nbufs as an index field */
+   req->nbufs = 0;
+@@ -590,6 +651,7 @@
+   req->ptr = dents;
+ 
+   return n;
++#endif /* __QNX__ */
+ }
+ 
+ static int uv__fs_opendir(uv_fs_t* req) {
+@@ -1148,12 +1210,18 @@
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)                                                         \
+-    || defined(__QNX__)
++    || defined(__sun)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+   return utimensat(AT_FDCWD, req->path, ts, 0);
++#elif defined(__QNX__)
++  struct timeval tv[2];
++  tv[0].tv_sec = (time_t) req->atime;
++  tv[0].tv_usec = (suseconds_t) ((req->atime - (double) tv[0].tv_sec) * 1e6);
++  tv[1].tv_sec = (time_t) req->mtime;
++  tv[1].tv_usec = (suseconds_t) ((req->mtime - (double) tv[1].tv_sec) * 1e6);
++  return utimes(req->path, tv);
+ #elif defined(_AIX) && !defined(_AIX71)
+   struct utimbuf buf;
+   buf.actime = req->atime;
+@@ -1183,8 +1251,7 @@
+     || defined(__NetBSD__)                                                    \
+     || defined(__OpenBSD__)                                                   \
+     || defined(__linux__)                                                     \
+-    || defined(__sun)                                                         \
+-    || defined(__QNX__)
++    || defined(__sun)
+   struct timespec ts[2];
+   ts[0] = uv__fs_to_timespec(req->atime);
+   ts[1] = uv__fs_to_timespec(req->mtime);
+@@ -1320,12 +1387,28 @@
+   times[0].tv_nsec = src_statsbuf.st_atime_n;
+   times[1].tv_sec = src_statsbuf.st_mtime;
+   times[1].tv_nsec = src_statsbuf.st_mtime_n;
++#elif defined(__QNX__)
++  times[0].tv_sec = src_statsbuf.st_atime;
++  times[0].tv_nsec = 0;
++  times[1].tv_sec = src_statsbuf.st_mtime;
++  times[1].tv_nsec = 0;
+ #else
+   times[0] = src_statsbuf.st_atim;
+   times[1] = src_statsbuf.st_mtim;
+ #endif
+ 
++#if defined(__QNX__)
++  {
++    struct timeval tv[2];
++    tv[0].tv_sec = (time_t) times[0].tv_sec;
++    tv[0].tv_usec = 0;
++    tv[1].tv_sec = (time_t) times[1].tv_sec;
++    tv[1].tv_usec = 0;
++    (void) utimes(req->new_path, tv);
++  }
++#else
+   (void) futimens(dstfd, times);
++#endif
+ 
+   /*
+    * Change the ownership and permissions of the destination file to match the
+--- a/deps/uv/src/unix/qnx.c
++++ b/deps/uv/src/unix/qnx.c
+@@ -23,7 +23,7 @@
+ #include "internal.h"
+ 
+ #include <string.h>
+-#include <sys/process.h>
++#include <process.h>
+ #include <sys/neutrino.h>
+ #include <sys/memmsg.h>
+ #include <sys/syspage.h>
+@@ -31,7 +31,13 @@
+ #include <time.h>
+ #include <stdlib.h>
+ #include <inttypes.h>
+-#if __QNX__ >= 800
++/* QNX 6.6 (BB10) syspage.h lacks these helpers and uses the old field name. */
++#if !defined(_SYSPAGE_ELEMENT_SIZE)
++#define _SYSPAGE_ELEMENT_SIZE(__base, __field) ((__base)->__field.entry_size)
++#define SYSPAGE_ARRAY_ADJ_OFFSET(__type, __ptr, __size)   ((__ptr) = (__typeof__(__ptr))((char *)(__ptr) + (__size)))
++#endif
++
++#if __QNX__ >= 800 || __QNX__ < 700
+ #define cpuinfo_val cpuinfo
+ #else
+ #define cpuinfo_val new_cpuinfo
+@@ -47,7 +53,11 @@
+ 
+   if (MsgSend(MEMMGR_COID, &msg.i, sizeof(msg.i), &msg.o, sizeof(msg.o))
+       != -1) {
++#if __QNX__ >= 700
+     *totalmem = msg.o.info.__posix_tmi_total;
++#else
++    *totalmem = msg.o.size;
++#endif
+     *freemem = msg.o.info.posix_tmi_length;
+   } else {
+     *totalmem = 0;
+@@ -102,17 +112,19 @@
+ }
+ 
+ uint64_t uv_get_free_memory(void) {
++  uint64_t totalmem;
+   uint64_t freemem;
+ 
+-  freemem = uv__read_pidin_info("FreeMem:");
++  get_mem_info(&totalmem, &freemem);
+   return freemem;
+ }
+ 
+ 
+ uint64_t uv_get_total_memory(void) {
+   uint64_t totalmem;
++  uint64_t freemem;
+ 
+-  totalmem = uv__read_pidin_info("MB/");
++  get_mem_info(&totalmem, &freemem);
+   return totalmem;
+ }
+ 
+@@ -129,19 +141,32 @@
+ 
+ int uv_resident_set_memory(size_t* rss) {
+   int fd;
++#if defined(DCMD_PROC_ASINFO)
+   procfs_asinfo asinfo;
++#else
++  /* QNX 6.6 has no ASINFO; private_mem is the closest available figure. */
++  procfs_info asinfo;
++#endif
+ 
+   fd = uv__open_cloexec("/proc/self/ctl", O_RDONLY);
+   if (fd == -1)
+     return UV__ERR(errno);
+ 
++#if defined(DCMD_PROC_ASINFO)
+   if (devctl(fd, DCMD_PROC_ASINFO, &asinfo, sizeof(asinfo), 0) == -1) {
++#else
++  if (devctl(fd, DCMD_PROC_INFO, &asinfo, sizeof(asinfo), 0) == -1) {
++#endif
+     uv__close(fd);
+     return UV__ERR(errno);
+   }
+ 
+   uv__close(fd);
++#if defined(DCMD_PROC_ASINFO)
+   *rss = asinfo.rss;
++#else
++  *rss = (size_t) asinfo.private_mem;
++#endif
+   return 0;
+ }
+ 
+--- a/deps/uv/src/unix/tty.c
++++ b/deps/uv/src/unix/tty.c
+@@ -125,6 +125,13 @@
+     abort();
+ 
+   result = (pts == major(sb.st_rdev));
++#elif defined(__QNX__)
++  /* QNX libc does not provide ptsname() (declared in <stdlib.h> but not
++     exported), so calling it leaves an unresolved dynamic symbol. The
++     process's standard streams are slave terminals; treat every tty as a
++     slave. */
++  (void) fd;
++  result = 1;
+ #else
+   /* Fallback to ptsname
+    */
+--- a/deps/uv/src/unix/udp.c
++++ b/deps/uv/src/unix/udp.c
+@@ -843,6 +843,7 @@
+     !defined(__ANDROID__) &&                                        \
+     !defined(__DragonFly__) &&                                      \
+     !defined(__GNU__) &&                                            \
++    !defined(__QNX__) &&                                             \
+     !defined(QNX_IOPKT)
+ static int uv__udp_set_source_membership4(uv_udp_t* handle,
+                                           const struct sockaddr_in* multicast_addr,
+@@ -1055,6 +1056,7 @@
+     !defined(__ANDROID__) &&                                        \
+     !defined(__DragonFly__) &&                                      \
+     !defined(__GNU__) &&                                          \
++    !defined(__QNX__) &&                                           \
+     !defined(QNX_IOPKT)
+   int err;
+   union uv__sockaddr mcast_addr;
+--- a/deps/v8/include/v8config.h
++++ b/deps/v8/include/v8config.h
+@@ -232,9 +232,8 @@
+ # define V8_TARGET_OS_IOS
+ #endif
+ 
+-#ifdef V8_OS_LINUX
+-# define V8_TARGET_OS_LINUX
+-#endif
++// The host toolset is built for the QNX target with a Linux host compiler.
++// Do not adopt the host OS as the target OS; see deps/v8/src/wasm/wasm-objects.cc.
+ 
+ #ifdef V8_OS_MACOS
+ # define V8_TARGET_OS_MACOS
+--- a/deps/v8/src/base/debug/stack_trace_posix.cc
++++ b/deps/v8/src/base/debug/stack_trace_posix.cc
+@@ -341,6 +341,11 @@
+ 
+ }  // namespace
+ 
++#if defined(V8_OS_QNX) && !defined(SA_ONSTACK)
++// QNX signal.h marks SA_ONSTACK as "not supported yet".
++#define SA_ONSTACK 0
++#endif
++
+ bool EnableInProcessStackDumping() {
+   // When running in an application, our code typically expects SIGPIPE
+   // to be ignored.  Therefore, when testing that same code, it should run
+--- a/deps/v8/src/base/platform/memory.h
++++ b/deps/v8/src/base/platform/memory.h
+@@ -27,7 +27,7 @@
+ #include <malloc.h>
+ #endif
+ 
+-#if (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS && !V8_OS_ZOS && !V8_OS_OPENBSD) || V8_OS_WIN
++#if (V8_OS_POSIX && !V8_OS_AIX && !V8_OS_SOLARIS && !V8_OS_ZOS && !V8_OS_OPENBSD && !V8_OS_QNX) || V8_OS_WIN
+ #define V8_HAS_MALLOC_USABLE_SIZE 1
+ #endif
+ 
+--- a/deps/v8/src/base/platform/platform-posix.cc
++++ b/deps/v8/src/base/platform/platform-posix.cc
+@@ -17,12 +17,17 @@
+ #include <fcntl.h>
+ #include <sched.h>  // for sched_yield
+ #include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <time.h>
+ #include <unistd.h>
++#if V8_OS_QNX
++#include <alloca.h>  // for __stackavail
++#endif
+ #if defined(__APPLE__) || defined(__DragonFly__) || defined(__FreeBSD__) || \
+     defined(__NetBSD__) || defined(__OpenBSD__)
+ #include <sys/sysctl.h>  // for sysctl
+@@ -72,7 +77,7 @@
+ #include <sys/resource.h>
+ #endif
+ 
+-#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !V8_OS_ZOS
++#if !defined(_AIX) && !defined(V8_OS_FUCHSIA) && !V8_OS_ZOS && !defined(V8_OS_QNX)
+ #include <sys/syscall.h>
+ #endif
+ 
+@@ -596,6 +601,9 @@
+   if (ret != 0 && errno == EINVAL) {
+     ret = madvise(reinterpret_cast<caddr_t>(address), size, MADV_DONTNEED);
+   }
++#elif defined(V8_OS_QNX)
++  // QNX has no madvise(); posix_madvise() returns an error number directly.
++  int ret = posix_madvise(address, size, POSIX_MADV_DONTNEED);
+ #else
+   int ret = madvise(address, size, MADV_DONTNEED);
+ #endif
+@@ -1388,6 +1396,60 @@
+   }
+   void* stack_start = reinterpret_cast<uint8_t*>(stack.ss_sp) + stack.ss_size;
+   return stack_start;
++#elif defined(V8_OS_QNX)
++  // QNX has no pthread_getattr_np(), and __stackavail() is the space
++  // remaining *below* the current stack pointer, so sp + __stackavail()
++  // points past the top of the stack. QNX procfs lists thread stacks as
++  // mappings named "{stack}" with an exact vaddr/size; prefer that, since a
++  // page-by-page msync probe can run into an adjacent mapping and overshoot.
++  uintptr_t sp = static_cast<uintptr_t>(Stack::GetCurrentStackPosition());
++  uintptr_t stack_top = 0;
++  int stack_lines = 0;
++  FILE* pmap = fopen("/proc/self/pmap", "r");
++  if (pmap != nullptr) {
++    char line[512];
++    // Skip the "vaddr,size,flags,..." header; data lines start with "0x".
++    while (fgets(line, sizeof(line), pmap) != nullptr) {
++      if (line[0] != '0' || (line[1] != 'x' && line[1] != 'X')) continue;
++      if (strstr(line, "{stack}") == nullptr) continue;
++      ++stack_lines;
++      char* end = nullptr;
++      uintptr_t vaddr = strtoull(line, &end, 16);
++      if (end == nullptr || *end != ',') continue;
++      uintptr_t size = strtoull(end + 1, &end, 16);
++      if (size != 0 && vaddr <= sp && sp - vaddr < size) {
++        stack_top = vaddr + size;
++        break;
++      }
++    }
++    fclose(pmap);
++  }
++  if (stack_top > sp) {
++    if (getenv("QNX_STACK_DEBUG") != nullptr) {
++      fprintf(stderr, "[qnx-stack] pmap sp=%p top=%p stack_lines=%d\n",
++              reinterpret_cast<void*>(sp),
++              reinterpret_cast<void*>(stack_top), stack_lines);
++    }
++    return reinterpret_cast<void*>(stack_top);
++  }
++
++  // Fallback: walk up page by page and stop at the first unmapped page.
++  // Bound the walk so an unrelated mapping directly above the stack cannot
++  // run away.
++  constexpr uintptr_t kPageSize = 4096;
++  constexpr uintptr_t kMaxStackSize = 16 * 1024 * 1024;
++  uintptr_t page = sp & ~(kPageSize - 1);
++  uintptr_t last_mapped = page;
++  for (uintptr_t end = page + kMaxStackSize; page < end; page += kPageSize) {
++    if (msync(reinterpret_cast<void*>(page), kPageSize, MS_ASYNC) != 0) break;
++    last_mapped = page;
++  }
++  if (getenv("QNX_STACK_DEBUG") != nullptr) {
++    fprintf(stderr, "[qnx-stack] fallback sp=%p top=%p stack_lines=%d\n",
++            reinterpret_cast<void*>(sp),
++            reinterpret_cast<void*>(last_mapped + kPageSize), stack_lines);
++  }
++  return reinterpret_cast<void*>(last_mapped + kPageSize);
+ #else
+   pthread_attr_t attr;
+   int error = pthread_getattr_np(pthread_self(), &attr);
+--- a/deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h
++++ b/deps/v8/src/compiler/turboshaft/int64-lowering-reducer.h
+@@ -637,7 +637,7 @@
+       result = __ Word32CountLeadingZeros(high);
+     }
+ 
+-    return __ Tuple<Word32, Word32>(result, __ Word32Constant(0));
++    return __ template Tuple<Word32, Word32>(result, __ Word32Constant(0));
+   }
+ 
+   V<Word32Pair> LowerCtz(V<Word32Pair> input) {
+@@ -650,7 +650,7 @@
+       result = __ Word32CountTrailingZeros(low);
+     }
+ 
+-    return __ Tuple<Word32, Word32>(result, __ Word32Constant(0));
++    return __ template Tuple<Word32, Word32>(result, __ Word32Constant(0));
+   }
+ 
+   V<Word32Pair> LowerPopCount(V<Word32Pair> input) {
+--- a/deps/v8/src/d8/d8.cc
++++ b/deps/v8/src/d8/d8.cc
+@@ -2995,7 +2995,7 @@
+   info.GetReturnValue().Set(source);
+ }
+ 
+-#if V8_TARGET_OS_LINUX && V8_ENABLE_WEBASSEMBLY
++#if defined(V8_TARGET_OS_LINUX) && V8_ENABLE_WEBASSEMBLY
+ void Shell::CreateWasmMemoryMapDescriptor(
+     const v8::FunctionCallbackInfo<v8::Value>& info) {
+   CHECK(i::v8_flags.experimental_wasm_memory_control);
+@@ -4040,7 +4040,7 @@
+                        FunctionTemplate::New(isolate, Shell::ReadFile));
+     file_template->Set(isolate, "execute",
+                        FunctionTemplate::New(isolate, Shell::ExecuteFile));
+-#if V8_TARGET_OS_LINUX && V8_ENABLE_WEBASSEMBLY
++#if defined(V8_TARGET_OS_LINUX) && V8_ENABLE_WEBASSEMBLY
+     if (i::v8_flags.experimental_wasm_memory_control) {
+       file_template->Set(
+           isolate, "create_wasm_memory_map_descriptor",
+--- a/deps/v8/src/flags/flag-definitions.h
++++ b/deps/v8/src/flags/flag-definitions.h
+@@ -541,7 +541,10 @@
+             "force emit tier-up logic from all non-turbofan code, even if it "
+             "is the top enabled tier")
+ #ifdef V8_ENABLE_MAGLEV
+-DEFINE_BOOL(maglev, true, "enable the maglev optimizing compiler")
++// Maglev on ARM/QNX hits UNREACHABLE in Uint32Mod: acquiring a VFP
++// scratch register fails in UseScratchRegisterScope::AcquireVfp.
++// Keep it available via --maglev but off by default.
++DEFINE_BOOL(maglev, false, "enable the maglev optimizing compiler")
+ #if !ENABLE_MAGLEV
+ // Enable Maglev on Future for platforms in which it's not enabled by default
+ // (eg, Android).
+--- a/deps/v8/src/json/json-stringifier.cc
++++ b/deps/v8/src/json/json-stringifier.cc
+@@ -3286,9 +3286,11 @@
+     const SrcChar* chars, size_t length,
+     const DisallowGarbageCollection& no_gc) {
+   constexpr int kUseSimdLengthThreshold = 32;
++#if HWY_TARGET != HWY_SCALAR
+   if (length >= kUseSimdLengthThreshold) {
+     return AppendStringSIMD(chars, length, no_gc);
+   }
++#endif
+   return AppendStringSWAR(chars, length, 0, 0, no_gc);
+ }
+ 
+--- a/deps/v8/src/wasm/std-object-sizes.h
++++ b/deps/v8/src/wasm/std-object-sizes.h
+@@ -68,7 +68,7 @@
+ // When one of these checks fails, that probably means you've added fields to
+ // a class guarded by it. Update the respective EstimateCurrentMemoryConsumption
+ // function accordingly, and then update the check's expected size.
+-#if V8_TARGET_ARCH_X64 && defined(__clang__) && V8_TARGET_OS_LINUX &&          \
++#if V8_TARGET_ARCH_X64 && defined(__clang__) && defined(V8_TARGET_OS_LINUX) &&   \
+     !V8_USE_ADDRESS_SANITIZER && !V8_USE_MEMORY_SANITIZER && defined(DEBUG) && \
+     V8_COMPRESS_POINTERS && !defined(V8_GC_MOLE) && defined(_LIBCPP_VERSION)
+ #define UPDATE_WHEN_CLASS_CHANGES(classname, size)                       \
+--- a/deps/v8/src/wasm/wasm-objects.cc
++++ b/deps/v8/src/wasm/wasm-objects.cc
+@@ -2,7 +2,7 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ 
+-#if V8_TARGET_OS_LINUX
++#if defined(V8_TARGET_OS_LINUX)
+ #include <sys/mman.h>
+ #include <sys/stat.h>
+ // `sys/mman.h defines `MAP_TYPE`, but `MAP_TYPE` also gets defined within V8.
+@@ -1329,7 +1329,7 @@
+ 
+ MaybeDirectHandle<WasmMemoryMapDescriptor>
+ WasmMemoryMapDescriptor::NewFromAnonymous(Isolate* isolate, size_t length) {
+-#if V8_TARGET_OS_LINUX
++#if defined(V8_TARGET_OS_LINUX)
+   CHECK(v8_flags.experimental_wasm_memory_control);
+   DirectHandle<JSFunction> descriptor_ctor(
+       isolate->native_context()->wasm_memory_map_descriptor_constructor(),
+@@ -1371,7 +1371,7 @@
+ 
+ size_t WasmMemoryMapDescriptor::MapDescriptor(
+     DirectHandle<WasmMemoryObject> memory, size_t offset) {
+-#if V8_TARGET_OS_LINUX
++#if defined(V8_TARGET_OS_LINUX)
+   CHECK(v8_flags.experimental_wasm_memory_control);
+   if (memory->array_buffer()->is_shared()) {
+     // TODO(ahaas): Handle concurrent calls to `MapDescriptor`. To prevent
+@@ -1417,7 +1417,7 @@
+ }
+ 
+ bool WasmMemoryMapDescriptor::UnmapDescriptor() {
+-#if V8_TARGET_OS_LINUX
++#if defined(V8_TARGET_OS_LINUX)
+   CHECK(v8_flags.experimental_wasm_memory_control);
+   DisallowGarbageCollection no_gc;
+ 
+--- a/node.gyp
++++ b/node.gyp
+@@ -1562,6 +1562,10 @@
+       'target_name': 'node_js2c',
+       'type': 'executable',
+       'toolsets': ['host'],
++      # libuv is configured for the QNX target here; the host toolset needs
++      # its own 32-bit Linux build of libuv instead.
++      'libraries!': [ '-luv' ],
++      'libraries': [ '/root/nodebuild/uv-host/libuv.a' ],
+       'include_dirs': [
+         'tools',
+         'src',
+--- a/src/cares_wrap.cc
++++ b/src/cares_wrap.cc
+@@ -55,6 +55,9 @@
+ #ifndef AI_V4MAPPED
+ # define AI_V4MAPPED 0
+ #endif
++#ifndef AI_ADDRCONFIG
++# define AI_ADDRCONFIG 0
++#endif
+ 
+ 
+ namespace node {
+--- a/src/debug_utils.cc
++++ b/src/debug_utils.cc
+@@ -14,7 +14,7 @@
+ 
+ #if defined(__linux__) && !defined(__GLIBC__) || \
+     defined(__UCLIBC__) || \
+-    defined(_AIX)
++    defined(_AIX) || defined(__QNX__)
+ #define HAVE_EXECINFO_H 0
+ #else
+ #define HAVE_EXECINFO_H 1
+--- a/src/node_credentials.cc
++++ b/src/node_credentials.cc
+@@ -219,7 +219,7 @@
+ 
+ static uid_t uid_by_name(Isolate* isolate, Local<Value> value) {
+   if (value->IsUint32()) {
+-    static_assert(std::is_same<uid_t, uint32_t>::value);
++    static_assert(sizeof(uid_t) == sizeof(uint32_t));
+     return value.As<Uint32>()->Value();
+   } else {
+     Utf8Value name(isolate, value);
+@@ -229,7 +229,7 @@
+ 
+ static gid_t gid_by_name(Isolate* isolate, Local<Value> value) {
+   if (value->IsUint32()) {
+-    static_assert(std::is_same<gid_t, uint32_t>::value);
++    static_assert(sizeof(gid_t) == sizeof(uint32_t));
+     return value.As<Uint32>()->Value();
+   } else {
+     Utf8Value name(isolate, value);
+--- a/tools/icu/icu_small.json
++++ b/tools/icu/icu_small.json
+@@ -11,12 +11,11 @@
+         "en"
+       ]
+     },
+-    "leavealone": {
+-    }
++    "leavealone": {}
+   },
+   "trees": {
+     "ROOT": "locales",
+-    "brkitr": "none",
++    "brkitr": "leavealone",
+     "coll": "locales",
+     "curr": "locales",
+     "lang": "none",
+@@ -26,8 +25,8 @@
+     "converters": "none",
+     "stringprep": "locales",
+     "translit": "locales",
+-    "brkfiles": "none",
+-    "brkdict": "none",
++    "brkfiles": "leavealone",
++    "brkdict": "leavealone",
+     "confusables": "none",
+     "unit": "locales"
+   },
+@@ -35,7 +34,6 @@
+     "cnvalias.icu",
+     "postalCodeData.res",
+     "genderList.res",
+-    "brkitr/root.res",
+     "unames.icu"
+   ],
+   "keep": [
+@@ -44,4 +42,4 @@
+     "zoneinfo64.res",
+     "likelySubtags.res"
+   ]
+-}
++}
+\ No newline at end of file
