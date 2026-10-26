@@ -54,17 +54,37 @@ and the device password) and, with Development Mode enabled, for qconnDoor.
 /accounts/1000/shared/misc/nodedist/
 ├── bin/
 │   ├── node.bin          # the Node binary
-│   ├── node.bin.pre-icu  # backup created by the installer
-│   ├── node              # small wrapper that sets LD_LIBRARY_PATH and execs node.bin
+│   ├── node.bin.pre-icu  # backup created by the binary-only installer
+│   ├── node              # relocatable wrapper (sets LD_LIBRARY_PATH)
 │   ├── npm
 │   └── npx
 └── lib/
-    └── libuv.so.1        # patched libuv
+    ├── libuv.so.1        # patched libuv (fcntl/ptsname/dirent)
+    ├── libstdc++.so.6
+    ├── libgcc_s.so.1
+    ├── libbacktrace.so.1
+    └── node_modules/npm  # npm 11.19.1
 ```
 
 `/var/tmp` may be cleared on reboot; keep Node under `/accounts/...`.
 
 ## 4. Install
+
+**Recommended: the complete runtime bundle.** It contains Node, npm 11.19.1,
+the patched libuv and the C++ runtime libraries.
+
+```sh
+BUNDLE=./bb10-node24-runtime-v24.22.1.tar.gz \
+DEVICE_IP=169.254.0.1 \
+KEY="$HOME/.ssh/bb10_rsa" \
+./deploy/install-runtime.sh
+```
+
+The installer uploads the bundle, moves any existing `nodedist/` to
+`nodedist.backup.<timestamp>`, extracts into
+`/accounts/1000/shared/misc`, fixes modes, and runs `node -v`.
+
+**Binary-only** (for an existing `nodedist/{bin,lib}` layout):
 
 ```sh
 BINARY=./node.bin.icu2 \
@@ -73,12 +93,8 @@ KEY="$HOME/.ssh/bb10_rsa" \
 ./deploy/install-node.sh
 ```
 
-The installer:
-
-1. copies the binary to `/tmp/node.bin.new`,
-2. creates `/accounts/.../bin/node.bin.pre-icu` once,
-3. replaces `node.bin` and sets mode 755,
-4. runs `node -v` with the right `LD_LIBRARY_PATH`.
+The binary-only installer copies the binary to `/tmp/node.bin.new`, backs up
+`node.bin` to `node.bin.pre-icu` once, replaces it, and runs `node -v`.
 
 If scp drops on a slow/large transfer, copy the binary over SMB to
 `/accounts/1000/shared/misc/` and then `cp` it into place over SSH (the SMB
@@ -102,6 +118,16 @@ node --expose-gc -e 'let k=[];for(let i=0;i<300;i++){for(let j=0;j<20000;j++)k.p
 For an interactive/TTY check, run `ssh -tt ... 'node -v; npm --version'`.
 
 ## 6. Rollback
+
+Runtime-bundle install:
+
+```sh
+cd /accounts/1000/shared/misc
+mv nodedist nodedist.failed
+mv nodedist.backup.<timestamp> nodedist   # choose the backup from install time
+```
+
+Binary-only install:
 
 ```sh
 cp -f /accounts/1000/shared/misc/nodedist/bin/node.bin.pre-icu \

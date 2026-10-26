@@ -19,11 +19,18 @@ Prebuilt binaries are published on the
 
 | Asset | Size | SHA-256 |
 |---|---|---|
-| `node.bin.icu2` (v24.22.1, stripped) | 62,725,912 B | `9a0b965e33769cb409b8dfb7f46c32c78d897b88a79d63aa312605ceff50968b` |
+| `bb10-node24-runtime-v24.22.1.tar.gz` **（推荐 / recommended）** | 28,447,631 B | `451291df7441cb9bd44dfc2f7004f6b974c79153cfb7bfbc7c3fcf462a5589a4` |
+| `node.bin.icu2`（仅二进制 / binary only） | 62,725,912 B | `9a0b965e33769cb409b8dfb7f46c32c78d897b88a79d63aa312605ceff50968b` |
 
-The binary is dynamically linked against the patched `libuv.so.1` and the
-system C/C++ runtime; see the deployment guide for the expected layout
-(`/accounts/1000/shared/misc/nodedist/{bin,lib}`).
+The **runtime bundle** is the recommended download. It contains
+`bin/node.bin`, relocatable `node`/`npm`/`npx` wrappers, the patched
+`libuv.so.1`, `libstdc++.so.6`, `libgcc_s.so.1`, `libbacktrace.so.1`, and
+npm 11.19.1. Extract it into `/accounts/1000/shared/misc` so it creates
+`nodedist/`.
+
+The standalone `node.bin.icu2` requires an existing
+`/accounts/1000/shared/misc/nodedist/{bin,lib}` layout with the patched
+libraries and npm.
 
 ## Features
 
@@ -90,7 +97,18 @@ llvm-strip-18 --strip-all out/Release/node
    ```
 
    The tunnel process must stay running; SSH is only available while it is up.
-3. Install the binary:
+3. Install the complete runtime (recommended):
+
+   ```sh
+   BUNDLE=./bb10-node24-runtime-v24.22.1.tar.gz \
+   DEVICE_IP=169.254.0.1 KEY="$HOME/.ssh/bb10_rsa" \
+     ./deploy/install-runtime.sh
+   ```
+
+   This extracts `nodedist/` (node, npm, patched libuv and C++ runtime) and
+   moves any previous runtime to `nodedist.backup.<timestamp>`.
+
+   Binary-only alternative (for an existing layout):
 
    ```sh
    BINARY=./node.bin.icu2 DEVICE_IP=169.254.0.1 KEY="$HOME/.ssh/bb10_rsa" \
